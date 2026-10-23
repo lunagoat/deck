@@ -51,42 +51,54 @@ async def main():
         primary = hub.attach("claude", "sess-p", str(ROOT), "subagent test", [("text", "hello")])
         task = primary.task
         primary.status = "running"
-        primary.proc = True  # fake, but truthy enough for kill checks
+        primary.proc = fake_proc()
         child1 = hub._add_run(task, "codex", parent=primary)
-        child1.status, child1.proc = "running", True
+        child1.status, child1.proc = "running", fake_proc()
         child2 = hub._add_run(task, "opencode", parent=primary)
-        child2.status, child2.proc = "running", True
+        child2.status, child2.proc = "running", fake_proc()
         child3 = hub._add_run(task, "copilot", parent=primary)
         child3.status = "queued"  # no proc yet
 
-        hub.kill(primary)
-        check("killing parent cascades to all children",
-              primary.status == "killed" and child1.status == "killed"
+        killed_count = hub.kill(primary)
+        check("killing parent cascades to all children and returns count",
+              killed_count == 4
+              and primary.status == "killed" and child1.status == "killed"
               and child2.status == "killed" and child3.status == "killed",
-              f"p={primary.status} c1={child1.status} c2={child2.status} c3={child3.status}")
+              f"count={killed_count} p={primary.status} c1={child1.status} c2={child2.status} c3={child3.status}")
 
         # Already-killed runs are no-ops
-        hub.kill(child1)
-        check("re-killing a killed run is a no-op", child1.status == "killed")
+        re_killed = hub.kill(child1)
+        check("re-killing a killed run is a no-op", re_killed == 0 and child1.status == "killed")
 
         # ---- 2: _run bails out for pre-killed runs ------------------------------------
+        real_run = core.Hub._run
         killed_run = hub._add_run(task, "codex", parent=primary)
         killed_run.status = "killed"
-        await hub._run(killed_run, "this should not run", False, None)
+        await real_run(hub, killed_run, "this should not run", False, None)
         check("_run() exits early for pre-killed run",
-              killed_run.status == "killed" and ("codex-2", "this should not run") not in sent,
-              f"status={killed_run.status} sent={sent}")
+              killed_run.status == "killed" and killed_run.ended > 0,
+              f"status={killed_run.status} ended={killed_run.ended}")
 
         # ---- 3: delegation from dead parent is rejected --------------------------------
         primary.status = "killed"
         result = await hub._handle({"op": "delegate", "from": primary.rid, "agent": "codex", "prompt": "test"})
         check("delegation from killed parent is rejected",
-              "error" in result and "no longer active" in result["error"], str(result))
+              "error" in result and "killed" in result["error"], str(result))
 
-        primary.status = "done"
+        primary.status = "failed"
         result = await hub._handle({"op": "delegate", "from": primary.rid, "agent": "codex", "prompt": "test"})
-        check("delegation from finished parent is rejected",
-              "error" in result and "no longer active" in result["error"], str(result))
+        check("delegation from failed parent is rejected",
+              "error" in result and "failed" in result["error"], str(result))
+
+        # ---- 3b: follow_up on killed run revives it ----------------------------------
+        revive_run = hub.attach("codex", "sess-rev", str(ROOT), "revive test", [("text", "hello")])
+        revive_run.status = "killed"
+        sent.clear()
+        await hub.follow_up(revive_run, "revive please")
+        await pilot.pause(0.2)
+        check("follow_up on killed run sets status done and proceeds",
+              revive_run.status != "killed" and any(prompt == "revive please" for _, prompt in sent),
+              f"status={revive_run.status} sent={sent}")
 
         # ---- 4: subagent panes are created dynamically ---------------------------------
         task2_primary = hub.attach("claude", "sess-t2", str(ROOT), "pane test", [("text", "hi")])
@@ -180,6 +192,21 @@ async def main():
         check("killing mid-level cascades to leaf",
               mid.status == "killed" and leaf.status == "killed" and parent2.status == "running",
               f"parent={parent2.status} mid={mid.status} leaf={leaf.status}")
+
+        # ---- 8: /stop on focused-finished parent with live subagent -------------------
+        task4_primary = hub.attach("claude", "sess-t4", str(ROOT), "stop test", [("text", "go")])
+        task4 = task4_primary.task
+        task4_primary.status = "done"  # parent finished its turn
+        live_child = hub._add_run(task4, "codex", parent=task4_primary)
+        live_child.status, live_child.proc = "running", fake_proc()
+        app.show_task(task4)
+        await pilot.pause(0.2)
+        # Focus parent pane and run /stop
+        app.panes[task4.id]["claude"].focus()
+        await app._slash("/stop")
+        check("/stop on focused finished parent kills live subagent",
+              live_child.status == "killed",
+              f"child status={live_child.status}")
 
     bad = [n for ok, n in results if not ok]
     print(f"\n{len(results) - len(bad)}/{len(results)} passed" + (f"; failed: {bad}" if bad else ""))

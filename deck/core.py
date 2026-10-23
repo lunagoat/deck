@@ -282,8 +282,8 @@ class Hub:
             agent = req.get("agent", "")
             if not parent:
                 return {"error": "unknown parent run"}
-            if not parent.live:
-                return {"error": "parent run is no longer active"}
+            if parent.status in ("killed", "failed"):
+                return {"error": f"parent run is {parent.status}"}
             if agent not in self.available():
                 return {"error": f"{agent!r} not available; choose from {sorted(self.available())}"}
             if agent == parent.agent:
@@ -435,6 +435,8 @@ class Hub:
     async def follow_up(self, run: Run, prompt: str, shown: str | None = None):
         if run.live or not run.session:
             return
+        if run.status == "killed":
+            run.status = "done"
         run.emit("info", f"── {shown or 'follow-up: ' + prompt}")
         asyncio.create_task(self._run(run, prompt, False, run.session))
 
@@ -502,6 +504,7 @@ class Hub:
     async def _run(self, run: Run, prompt: str, use_wt: bool, session: str | None):
         t = run.task
         if run.status == "killed":
+            run.queued.clear()
             run.ended = time.time()
             self.notify(run)
             return
@@ -581,6 +584,11 @@ class Hub:
                 run.proc = await asyncio.create_subprocess_exec(
                     *cmd, cwd=run.cwd, env=env, stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, limit=1 << 24)
+                if run.status == "killed":
+                    try:
+                        run.proc.terminate()
+                    except ProcessLookupError:
+                        pass
                 async for raw in run.proc.stdout:
                     for ev in ad.parse(raw.decode(errors="replace").rstrip("\n")):
                         apply(ev)
@@ -621,9 +629,15 @@ class Hub:
             self.tasks.append(t)
         return r
 
-    def kill(self, run: Run):
+    def kill(self, run: Run, seen: set[int] | None = None) -> int:
+        seen = set() if seen is None else seen
+        if run.rid in seen:
+            return 0
+        seen.add(run.rid)
+        n = 0
         if run.live:
             run.status = "killed"
+            n += 1
             if run.proc:
                 try:
                     run.proc.terminate()
@@ -631,7 +645,8 @@ class Hub:
                     pass
         # Cascade: kill all children (subagents) of this run too
         for child in self.children(run):
-            self.kill(child)
+            n += self.kill(child, seen)
+        return n
 
     async def diff(self, run: Run) -> str:
         if not run.branch:  # ran in place (or delegated into its parent's tree): show the tree's changes

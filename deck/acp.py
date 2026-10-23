@@ -64,6 +64,11 @@ async def drive(hub, run, prompt: str, session: str | None, *, argv: list[str], 
         *argv, cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE, limit=1 << 24)
     run.proc = proc
+    if run.status == "killed":
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
     rpc = Rpc(proc, jsonrpc=True)
     stderr_tail: deque[str] = deque(maxlen=6)
     tools: dict[str, dict] = {}       # toolCallId -> what we know so far
