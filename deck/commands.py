@@ -239,7 +239,7 @@ async def cmd_usage(app, rest: str):
     body = Text("\n\n").join(usage_view.lines(book, agents, app._colors(), bar_width=30, explain=True)) \
         if agents else Text("no agents found")
     body.append("\n\nclaude's bars update whenever claude runs (or: /usage refresh claude, which makes one tiny"
-                "\nhaiku turn and counts against your limit). codex's are read live. alt+u switches the strip.",
+                "\nhaiku turn and counts against your limit). codex, agy, copilot and opencode are read live.\nalt+u switches the strip.",
                 style="grey50")
     app.show_text("usage limits", body)
 

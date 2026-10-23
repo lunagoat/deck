@@ -32,6 +32,17 @@ CLAUDE_EVENT = {"status": "allowed", "resetsAt": 1792737600, "rateLimitType": "f
 CODEX_LIMITS = {"limitId": "codex", "primary": {"usedPercent": 25, "windowDurationMins": 300, "resetsAt": 1792736197},
                 "secondary": {"usedPercent": 4, "windowDurationMins": 10080, "resetsAt": 1793322997},
                 "credits": {"hasCredits": True, "unlimited": False, "balance": "2500.00"}, "planType": "plus"}
+AGY_EVENT = {"event": "command_result", "command": {"name": "usage", "data": {"groups": [
+    {"name": "Gemini Models", "buckets": [
+        {"id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.18, "reset_time": "2026-10-26T19:00:34Z"},
+        {"id": "gemini-5h", "window": "5h", "remaining_fraction": 1, "reset_time": "2026-10-23T21:57:35Z"}]},
+    {"name": "Claude and GPT models", "buckets": [
+        {"id": "3p-weekly", "window": "weekly", "remaining_fraction": 0.5, "reset_time": "2026-10-30T05:30:38Z"}]}]}}}
+
+COPILOT_USER = {"copilot_plan": "individual", "quota_reset_date_utc": "2026-11-01T00:00:00.000Z", "quota_snapshots": {
+    "chat": {"percent_remaining": 98.8, "has_quota": True, "unlimited": False},
+    "completions": {"percent_remaining": 100.0, "has_quota": True, "unlimited": False},
+    "premium_interactions": {"percent_remaining": 0.0, "has_quota": False, "unlimited": False}}}
 
 
 async def main():
@@ -201,12 +212,22 @@ async def main():
         check("readings survive a restart", reopened.data["claude"].windows[0].used == 0.63)
         old = usage.lines(hub.usage, ["claude"], {}, now=time.time() + 7200)[0].plain
         check("an old reading says so", "as of 2h ago" in old, old)
+        aw = usage.agy_windows(AGY_EVENT)
+        check("agy's /usage maps to windows, most used first",
+              [(w.label, round(w.used, 2)) for w in aw] == [("gem 7d", 0.82), ("claude/gpt 7d", 0.5), ("gem 5h", 0.0)]
+              and aw[0].resets_at == 1793041234, aw)
+        cw2, plan = usage.copilot_windows(COPILOT_USER)
+        check("copilot quotas skip plans without them, most used first",
+              [(w.label, round(w.used, 3)) for w in cw2] == [("chat", 0.012), ("compl", 0.0)] and plan == "individual"
+              and cw2[0].resets_at == 1793491200, cw2)
+        note = usage.opencode_note({"tokens": {"input": 0, "output": 0}}, {"tokens": {"input": 940542, "output": 123246, "reasoning": 200954,
+                                                                                        "cache": {"read": 21600986}}, "cost": 0})
+        check("opencode shows tokens, not cache reads", note == "0 tokens today · 1.3m in 7d", note)
         check("countdown formats", usage.countdown(time.time() + 3 * 3600 + 5 * 60 + 30) == "3h05m"
               and usage.countdown(time.time() + 2 * 86400 + 3600 + 30) == "2d1h" and usage.countdown(time.time() - 5) == "reset")
         await type_("/usage")
         check("/usage opens the bars", isinstance(app.screen, DiffScreen) and "63%" in app.screen.text.plain, "")
-        check("/usage is honest about agents without limits", "aren't exposed" in app.screen.text.plain
-              or "pay-per-use" in app.screen.text.plain, app.screen.text.plain[-400:])
+        check("/usage is honest about agents without limits", "needs the gh CLI" in app.screen.text.plain, app.screen.text.plain[-400:])
         await pilot.press("escape")
 
         # ---- 2: primary -------------------------------------------------------------------------

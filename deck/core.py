@@ -5,6 +5,8 @@ import asyncio
 import json
 import os
 import re
+import shutil
+import tempfile
 import time
 import tomllib
 from dataclasses import dataclass, field
@@ -15,7 +17,7 @@ from . import detect, sandbox
 from .adapters import ORDER, Adapter, Claude, _tool_summary, make_adapters, register_custom
 from .paths import CONFIG, STATE, WORKTREES
 from .safety import danger
-from .usage import UsageBook, claude_windows, codex_windows
+from .usage import UsageBook, agy_windows, claude_windows, codex_windows, copilot_windows, opencode_note
 
 
 DEFAULT_CONFIG = {
@@ -387,9 +389,22 @@ class Hub:
         return set(self.found)
 
     async def refresh_usage(self, claude: bool = False) -> str:
-        """Re-read limits. codex is free to ask; claude only reports them while running, so asking
+        """Re-read limits. codex and agy are free to ask; claude only reports them while running, so asking
         means one tiny haiku turn, which counts against your limit like any other, hence opt-in."""
         notes = []
+        if "agy" in self.found:
+            with tempfile.TemporaryDirectory() as scratch:  # a slash command, but don't let it touch a real project
+                rc, out = await sh(self.exe("agy"), "--output-format", "stream-json", "-p=/usage", cwd=scratch)
+            for line in out.splitlines():
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get("event") == "command_result" and (w := agy_windows(d)):
+                    self.usage.set("agy", w)
+                    break
+            else:
+                notes.append("agy limits unavailable")
         if "codex" in self.found:
             from . import codexserver
             limits = await codexserver.read_rate_limits(self.exe("codex"))
@@ -397,6 +412,22 @@ class Hub:
                 self.usage.set("codex", *codex_windows(limits))
             else:
                 notes.append("codex limits unavailable")
+        if "copilot" in self.found:
+            rc, out = await sh("gh", "api", "copilot_internal/user") if shutil.which("gh") else (1, "")
+            try:
+                windows, plan = copilot_windows(json.loads(out))
+            except ValueError:
+                windows, plan = [], ""
+            if windows:
+                self.usage.set("copilot", windows, plan)
+            else:
+                notes.append("copilot quota unavailable (is gh logged in?)")
+        if "opencode" in self.found:
+            reads = [await sh(self.exe("opencode"), "stats", "--standalone", "--days", str(d), "--json") for d in (0, 7)]
+            try:
+                self.usage.set("opencode", [], opencode_note(*(json.loads(out) for rc, out in reads)))
+            except ValueError:
+                notes.append("opencode stats unavailable")
         if claude and "claude" in self.found:
             rc, out = await sh(self.exe("claude"), "-p", "ok", "--model", "haiku", "--output-format", "stream-json",
                                "--verbose", "--permission-mode", "plan")
