@@ -290,7 +290,8 @@ class Hub:
                 return {"error": "don't delegate to yourself"}
             if parent.depth + 1 > self.cfg["max_depth"]:
                 return {"error": "delegation depth limit reached"}
-            if len(parent.task.runs) > self.cfg["max_delegations"]:
+            delegations = sum(1 for r in parent.task.runs.values() if r.parent is not None)
+            if delegations >= self.cfg["max_delegations"]:
                 return {"error": "delegation limit reached for this task"}
             child = self._add_run(parent.task, agent, parent=parent)
             child.plan = parent.plan
@@ -437,6 +438,7 @@ class Hub:
             return
         if run.status == "killed":
             run.status = "done"
+        run.reported = False
         run.emit("info", f"── {shown or 'follow-up: ' + prompt}")
         asyncio.create_task(self._run(run, prompt, False, run.session))
 
@@ -465,6 +467,8 @@ class Hub:
         """Called whenever a run stops. Delivers queued replies, and wakes a parent whose delegates are done."""
         if run.status == "killed":
             run.queued.clear()
+            if run.parent:
+                self._maybe_checkin(run.parent)
             return
         if run.queued and run.session:
             n, text, run.queued = len(run.queued), "\n\n".join(run.queued), []
@@ -484,22 +488,30 @@ class Hub:
             asyncio.get_running_loop().call_later(CHECKIN_DELAY, lambda: asyncio.create_task(self._checkin(parent)))
 
     async def _checkin(self, parent: Run):
-        parent.checkin_armed = False
-        if parent.live:  # it started something else meanwhile; _after_turn will look again
-            return
-        done = [c for c in self.children(parent) if not c.live and not c.reported]
-        if not done:
-            return
-        parts = []
-        for c in done:
-            c.reported = True
-            parts.append(f"--- {c.label} ({c.status}) ---\n{await self.report(c)}")
-        still = [c.label for c in self.children(parent) if c.live]
-        message = ("[deck] Your delegated tasks have finished:\n\n" + "\n\n".join(parts)
-                   + (f"\n\nStill running: {', '.join(still)}. They will be reported when done." if still else "")
-                   + "\n\nContinue your task using these results. If nothing more is needed, say so briefly.")
-        parent.checkins += 1
-        await self.follow_up(parent, message, "check-in: " + ", ".join(f"{c.label} {c.status}" for c in done))
+        try:
+            if parent.live or parent.status == "killed":
+                return
+            done = [c for c in self.children(parent) if not c.live and not c.reported]
+            if not done:
+                return
+            parts = []
+            for c in done:
+                parts.append(f"--- {c.label} ({c.status}) ---\n{await self.report(c)}")
+            # Re-check parent state after awaiting reports
+            if parent.live or parent.status == "killed":
+                return
+            for c in done:
+                c.reported = True
+            still = [c.label for c in self.children(parent) if c.live]
+            message = ("[deck] Your delegated tasks have finished:\n\n" + "\n\n".join(parts)
+                       + (f"\n\nStill running: {', '.join(still)}. They will be reported when done." if still else "")
+                       + "\n\nContinue your task using these results. If nothing more is needed, say so briefly.")
+            parent.checkins += 1
+            await self.follow_up(parent, message, "check-in: " + ", ".join(f"{c.label} {c.status}" for c in done))
+        finally:
+            parent.checkin_armed = False
+            if not parent.live and any(not c.live and not c.reported for c in self.children(parent)):
+                self._maybe_checkin(parent)
 
     async def _run(self, run: Run, prompt: str, use_wt: bool, session: str | None):
         t = run.task
