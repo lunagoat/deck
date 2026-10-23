@@ -98,6 +98,11 @@ async def drive(hub, run, prompt: str, session: str | None, *, model: str, effor
         exe, "app-server", cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, limit=1 << 24)
     run.proc = proc
+    if run.status == "killed":
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
     rpc = Rpc(proc)
     items: dict[str, dict] = {}          # item id -> item, so file-change approvals know the paths
     turn_done = asyncio.Event()

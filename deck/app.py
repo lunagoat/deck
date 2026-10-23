@@ -904,7 +904,8 @@ class DeckApp(App):
         self._update_target()
 
     def _set_columns(self, n: int):
-        self.query_one("#grid", Container).styles.grid_size_columns = 1 if n <= 1 else 3 if n in (3, 5, 6) else 2
+        self.query_one("#grid", Container).styles.grid_size_columns = (
+            1 if n <= 1 else 2 if n == 2 or n == 4 else 3)
 
     def action_toggle_finished(self):
         self.show_finished = not self.show_finished

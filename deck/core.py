@@ -282,13 +282,16 @@ class Hub:
             agent = req.get("agent", "")
             if not parent:
                 return {"error": "unknown parent run"}
+            if parent.status in ("killed", "failed"):
+                return {"error": f"parent run is {parent.status}"}
             if agent not in self.available():
                 return {"error": f"{agent!r} not available; choose from {sorted(self.available())}"}
             if agent == parent.agent:
                 return {"error": "don't delegate to yourself"}
             if parent.depth + 1 > self.cfg["max_depth"]:
                 return {"error": "delegation depth limit reached"}
-            if len(parent.task.runs) > self.cfg["max_delegations"]:
+            delegations = sum(1 for r in parent.task.runs.values() if r.parent is not None)
+            if delegations >= self.cfg["max_delegations"]:
                 return {"error": "delegation limit reached for this task"}
             child = self._add_run(parent.task, agent, parent=parent)
             child.plan = parent.plan
@@ -433,6 +436,9 @@ class Hub:
     async def follow_up(self, run: Run, prompt: str, shown: str | None = None):
         if run.live or not run.session:
             return
+        if run.status == "killed":
+            run.status = "done"
+        run.reported = False
         run.emit("info", f"── {shown or 'follow-up: ' + prompt}")
         asyncio.create_task(self._run(run, prompt, False, run.session))
 
@@ -461,6 +467,8 @@ class Hub:
         """Called whenever a run stops. Delivers queued replies, and wakes a parent whose delegates are done."""
         if run.status == "killed":
             run.queued.clear()
+            if run.parent:
+                self._maybe_checkin(run.parent)
             return
         if run.queued and run.session:
             n, text, run.queued = len(run.queued), "\n\n".join(run.queued), []
@@ -480,25 +488,38 @@ class Hub:
             asyncio.get_running_loop().call_later(CHECKIN_DELAY, lambda: asyncio.create_task(self._checkin(parent)))
 
     async def _checkin(self, parent: Run):
-        parent.checkin_armed = False
-        if parent.live:  # it started something else meanwhile; _after_turn will look again
-            return
-        done = [c for c in self.children(parent) if not c.live and not c.reported]
-        if not done:
-            return
-        parts = []
-        for c in done:
-            c.reported = True
-            parts.append(f"--- {c.label} ({c.status}) ---\n{await self.report(c)}")
-        still = [c.label for c in self.children(parent) if c.live]
-        message = ("[deck] Your delegated tasks have finished:\n\n" + "\n\n".join(parts)
-                   + (f"\n\nStill running: {', '.join(still)}. They will be reported when done." if still else "")
-                   + "\n\nContinue your task using these results. If nothing more is needed, say so briefly.")
-        parent.checkins += 1
-        await self.follow_up(parent, message, "check-in: " + ", ".join(f"{c.label} {c.status}" for c in done))
+        try:
+            if parent.live or parent.status == "killed":
+                return
+            done = [c for c in self.children(parent) if not c.live and not c.reported]
+            if not done:
+                return
+            parts = []
+            for c in done:
+                parts.append(f"--- {c.label} ({c.status}) ---\n{await self.report(c)}")
+            # Re-check parent state after awaiting reports
+            if parent.live or parent.status == "killed":
+                return
+            for c in done:
+                c.reported = True
+            still = [c.label for c in self.children(parent) if c.live]
+            message = ("[deck] Your delegated tasks have finished:\n\n" + "\n\n".join(parts)
+                       + (f"\n\nStill running: {', '.join(still)}. They will be reported when done." if still else "")
+                       + "\n\nContinue your task using these results. If nothing more is needed, say so briefly.")
+            parent.checkins += 1
+            await self.follow_up(parent, message, "check-in: " + ", ".join(f"{c.label} {c.status}" for c in done))
+        finally:
+            parent.checkin_armed = False
+            if not parent.live and any(not c.live and not c.reported for c in self.children(parent)):
+                self._maybe_checkin(parent)
 
     async def _run(self, run: Run, prompt: str, use_wt: bool, session: str | None):
         t = run.task
+        if run.status == "killed":
+            run.queued.clear()
+            run.ended = time.time()
+            self.notify(run)
+            return
         ad: Adapter = make_adapters()[run.agent]
         run.status, run.started, run.ended = "running", time.time(), 0.0
         run.summary = ""
@@ -575,6 +596,11 @@ class Hub:
                 run.proc = await asyncio.create_subprocess_exec(
                     *cmd, cwd=run.cwd, env=env, stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, limit=1 << 24)
+                if run.status == "killed":
+                    try:
+                        run.proc.terminate()
+                    except ProcessLookupError:
+                        pass
                 async for raw in run.proc.stdout:
                     for ev in ad.parse(raw.decode(errors="replace").rstrip("\n")):
                         apply(ev)
@@ -615,13 +641,24 @@ class Hub:
             self.tasks.append(t)
         return r
 
-    def kill(self, run: Run):
-        if run.proc and run.live:
+    def kill(self, run: Run, seen: set[int] | None = None) -> int:
+        seen = set() if seen is None else seen
+        if run.rid in seen:
+            return 0
+        seen.add(run.rid)
+        n = 0
+        if run.live:
             run.status = "killed"
-            try:
-                run.proc.terminate()
-            except ProcessLookupError:
-                pass
+            n += 1
+            if run.proc:
+                try:
+                    run.proc.terminate()
+                except ProcessLookupError:
+                    pass
+        # Cascade: kill all children (subagents) of this run too
+        for child in self.children(run):
+            n += self.kill(child, seen)
+        return n
 
     async def diff(self, run: Run) -> str:
         if not run.branch:  # ran in place (or delegated into its parent's tree): show the tree's changes

@@ -77,13 +77,9 @@ async def cmd_rename(app, rest: str):
 
 
 async def cmd_stop(app, rest: str):
-    run = app.target_run() if app.focused_run() else None
+    run = app.focused_run()
     runs = [run] if run else [r for r in (app.current.runs.values() if app.current else []) if r.live]
-    n = 0
-    for r in runs:
-        if r.live:
-            app.hub.kill(r)
-            n += 1
+    n = sum(app.hub.kill(r) for r in runs)
     app.flash(f"stopped {n} run{'s' if n != 1 else ''}" if n else "nothing is running")
 
 
