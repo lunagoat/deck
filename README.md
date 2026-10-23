@@ -46,8 +46,10 @@ gets its own pane, and when they finish deck wakes the primary with their result
 - **Worktrees**: in a git repo each run works in its own worktree and branch (`deck/<stamp>-<id>-<agent>` under
   `~/.local/share/deck/worktrees/`), so agents can't trample each other. In a pane (`Tab` to focus, `Esc` to go back to the prompt):
   `d` diff, `m` commit and merge into your current branch, `x` stop, `f` follow-up, `D` discard the worktree and branch.
+  Stopping a run (`x` or `/stop`) also stops its subagents; stopping a delegate only affects that delegate and its own subagents.
   Worktrees start from `HEAD`: uncommitted changes in your tree aren't visible to the agents.
-- **Panes**: finished panes hide while something else is working and the main conversation stays open when everyone is idle.
+- **Panes**: delegates open in their own panes with lineage titles (`parent → child`), and the primary gets a `★` once it delegates.
+  Finished panes hide while something else is working and the main conversation stays open when everyone is idle.
   `alt+h` shows all, `/panes` or `alt+p` picks which stay open. Repeated `/resume` opens separate saved conversations
   side by side (`claude-2`, ... reply with `@claude-2`).
 - **Text**: agent output is rendered as markdown (tables included). Drag to select, `ctrl+c` copies, `/copy` copies a whole response.
