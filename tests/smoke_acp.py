@@ -10,7 +10,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-FAKE = ROOT / ".scratch" / "acp"
+import _env  # noqa: E402
+
+FAKE = _env.BASE / "acp"
 shutil.rmtree(FAKE, ignore_errors=True)
 (FAKE / "config" / "deck").mkdir(parents=True)
 (FAKE / "work").mkdir(parents=True)

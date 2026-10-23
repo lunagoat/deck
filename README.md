@@ -1,99 +1,168 @@
 # deck
 
-**Vibecoded, experimental, and built with coding agents.** This is a personal project that is evolving quickly;
-expect rough edges. Tests cover simulated agent flows, but not every real CLI/version has been exercised.
+A terminal dashboard for coding agents. Type a task, and `deck` runs it with Claude, Codex, opencode, Antigravity and
+friends side by side: one pane per agent, one primary agent that hands work to the others, and a confirm/deny
+dialog whenever an agent wants to do something risky.
 
-Terminal dashboard: type a task, fan it out to several coding agents, watch them side by side.
+> **Built with coding agents, and experimental.** This is a personal project that changes quickly; expect rough
+> edges. The tests drive simulated agents, so not every real CLI and version has been exercised. The agents marked
+> "untested" below follow their documentation and nothing more.
 
-Quick start from this checkout (Python 3.11+):
-
-```sh
-python3 -m venv .venv
-.venv/bin/pip install textual
-.venv/bin/python -m deck
-```
-
-To work in a different project, run the checkout's Python with the checkout on `PYTHONPATH`:
+## Install
 
 ```sh
-cd /path/to/your/project
-PYTHONPATH=/path/to/deck /path/to/deck/.venv/bin/python -m deck
+curl -fsSL https://raw.githubusercontent.com/lunagoat/deck/main/install.sh | sh
 ```
 
-Agent CLIs must be installed and authenticated separately. Linux sandboxed adapters also require `bwrap` (bubblewrap).
+That clones deck into `~/.local/share/deck-app`, builds a private virtualenv there (the only dependency is
+[`textual`](https://github.com/Textualize/textual)), and puts a `deck` launcher in `~/.local/bin`. The script is short;
+[read it first](install.sh) if you like. Run it again (or `deck --update`) to update, and
+`curl -fsSL https://raw.githubusercontent.com/lunagoat/deck/main/install.sh | sh -s -- --uninstall` to remove it.
+Pin a version with `DECK_REF=<tag>`.
 
-Run `deck` from inside a project. Needs `claude`, `codex`, `opencode`, `agy` and/or `copilot` on PATH
-(each already logged in).
+**You need:** Linux (the only platform it has been tested on), Python 3.11+, git, and at least one coding-agent CLI
+that is installed and logged in. [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) is needed for the
+agents deck fences in (see [Safety](#safety)); without it those agents refuse to run.
 
-- Pick agents: `@claude @codex` in the prompt, `@all`, `alt+1..5` to toggle defaults, or nothing = claude (which delegates when asked).
-- Each run gets its own git worktree (`~/.local/share/deck/worktrees/`) on branch `deck/<stamp>-<id>-<agent>`.
-- In a pane (Tab / Esc): `d` diff, `m` commit + merge into your current branch, `x` kill,
-  `f` follow-up (resumes that agent's session), `D` discard worktree + branch.
-- Finished panes hide automatically; queued/running agents and agents waiting for permission stay visible.
-  When everyone is idle, the main conversation stays open. Resumed conversations are visible immediately.
-  Follow-ups and check-ins bring panes back. `alt+h` toggles finished panes for reviewing results; history is retained.
-  `/panes` or `alt+p` opens a picker: Enter toggles each conversation's keep-open setting, and Esc returns.
-  Keep several finished panes open together; Tab focuses one to read it or press `f` to reply. Settings last for this deck session.
-- Repeat `/resume` to open separate saved conversations side by side, including multiple sessions from the same agent.
-  Each keeps its own history, session ID and folder; labels such as `claude-2` let you reply with `@claude-2`.
-  Explicitly resumed panes stay open. `/new` before `/resume` starts a separate view.
-- Type `/` for a command menu (up/down, tab completes, enter runs). `/model` and `/effort` stay open so you can set several agents in one visit.
-  Commands (names follow Claude Code's list where the idea fits; aliases in brackets):
-  `/new` (`/clear` `/reset`) fresh start, old tasks stay · `/resume [all]` · `/model` · `/effort` (alt+e) · `/plan <task>` agents plan, change nothing ·
-  `/compact` (claude only) · `/diff` · `/cost` (`/usage` `/stats`) · `/stop` · `/rename` · `/export [file]` · `/copy` · `/cd <path>` ·
-  `/status` (`/doctor`) · `/config [worktrees=on|off] [claude_mode=auto|manual|acceptEdits]` · `/help` · `/exit` (`/quit`).
-  Anything else starting with `/` is sent to the agent as a normal prompt (e.g. a Claude skill). The agents' own built-in TUI commands
-  don't exist in headless mode, so deck re-implements the ones that make sense for a dashboard. Commands live in `deck/commands.py`.
-- Agent detection: on start deck looks for each supported CLI (`claude`, `codex`, `opencode`, `agy`, `copilot`) on PATH and in the usual
-  install dirs (`~/.local/bin`, `~/.cargo/bin`, `~/.bun/bin`, `~/.npm-global/bin`, Homebrew...), and only offers the ones it finds. Installed
-  something new? `/rescan` or `alt+r`. `/status` shows versions and paths, and lists popular agents deck can't drive yet (Gemini CLI, Aider,
-  Cursor CLI, Amp, Goose, Crush, Qwen Code, Droid...).
-- Any other CLI can be added in `~/.config/deck/config.toml` without code. If it speaks ACP, use `acp` (real approve/deny, resumable);
-  `fenced = false` turns the sandbox off for an agent whose own asking you trust:
-  ```toml
-  [agents.myagent]
-  acp = ["myagent", "--acp"]     # the command that starts its ACP server on stdio
-  fenced = true                  # default
-  ```
-  Otherwise give a headless command: it runs fenced in (same sandbox as agy), output as plain text, no resume:
-  ```toml
-  [agents.gemini]
-  command = ["gemini", "-p", "{prompt}"]   # {prompt} and {model} are filled in
-  model_flag = ["--model", "{model}"]      # optional
-  color = "#4285f4"                        # optional
-  ```
-- Tests: `.venv/bin/python tests/smoke_commands.py`, `smoke_permissions.py`, `smoke_detect.py`, `smoke_flow.py`, `smoke_acp.py` (uses `tests/fake_acp_agent.py`) (headless, never call a real agent).
-- **Replying**: with a task on screen, plain text continues *that* conversation (the primary agent's, or the focused pane's). `@codex ...`
-  sends it to codex's run (an agent not in the task yet joins it). If the run is busy your message is queued and delivered when it finishes.
-  `/new` (blank slate) or `/task <prompt>` start something separate. The input's placeholder always says who you're replying to.
-- **Primary agent + delegation**: new tasks start with the primary agent (`claude`; change with `/primary <agent>`), which hands work to the
-  others through `bin/deck-delegate` (it's told how in its system prompt). It can wait for an answer, or `--start` a delegate and keep
-  working, `--poll` for progress, or simply end its turn: when its delegates finish, deck **checks in** by resuming the primary with their
-  results ("── check-in: codex done"), so it never has to sit and wait. `auto_checkin` / `max_checkins` in config.toml. Delegates get
-  the full answer (long ones keep both ends).
-- **Usage bars**: a strip above the input shows each agent's limit windows as progress bars with reset countdowns (`alt+u` collapses it to one line,
-  `/usage` has the detail): claude from the `rate_limit_event` in its stream (updates whenever claude runs; `/usage refresh claude` makes one tiny
-  haiku turn), codex read live from `codex app-server` (5-hour and weekly windows, plan, credits), saved between sessions. agy, opencode and
-  copilot don't expose limits through their CLIs, and `/usage` says so rather than guessing.
-- Config: `~/.config/deck/config.toml` — `worktrees`, `default_agents`, `[[rules]]` (match regex -> agents).
-- Permissions: deck never passes a skip-permissions / bypass flag. Where an agent has its own safeguards, deck uses them and only adds
-  the answering: a confirm/deny dialog (`y` allow once, `a` allow that kind of thing for this run, `n`/esc deny; `a` is never offered for
-  `rm`, `git push` and other dangerous commands, see `deck/safety.py`).
-  - **claude**: its own permission mode, `auto` by default (the same classifier you use in the terminal), with anything it escalates
-    answered through `--permission-prompt-tool` (`bin/deck-permission-mcp`). In my tests `auto` ran everything I asked for without
-    a question, including an explicitly requested `rm -rf`, so for more stops use `/config claude_mode=manual` (asks about edits,
-    shell writes and `rm`, and is noisy) or `acceptEdits`. Set it permanently with `claude_mode = "manual"` in config.toml.
-  - **codex**: run through `codex app-server` (JSON-RPC) instead of `codex exec`, with its own `on-request` policy in the workspace-write
-    sandbox. It asks before `rm` and anything its sandbox blocks (`deck/codexserver.py`). `exec` can't ask at all.
-  - **ACP agents** (opencode built in; Gemini CLI, Cursor, Qwen Code, Cline, Kiro, Goose, Kilo, Augment, Mistral Vibe and Junie when installed):
-    driven over the Agent Client Protocol (`deck/acp.py`). An ACP agent sends `session/request_permission` before a tool call it isn't sure
-    about, and deck answers with the same dialog, replying with an option id the agent offered. The agent keeps its own safeguards; deck
-    only supplies the answers. They also run **fenced in** (below) as a backstop, because a default config may not ask about anything
-    (opencode's doesn't ask about `rm`). If both fire for the same command you're asked once: a yes to an exact command is remembered for 2 minutes.
-    Only opencode is tested against the real thing; the others follow their docs and are labelled "untested" in the pane header.
-  - **agy, copilot**: no ACP server and their headless modes never ask (agy's print mode reports `permission_mode: always-proceed` whatever
-    `--mode` says, and `--mode auto` isn't available on this account). So deck builds the rules itself (`deck/sandbox.py`): bubblewrap makes
-    everything read-only except the run's folder, and `rm`, `rmdir`, `shred`, `dd`, `truncate`, `sudo`, `kill`... on PATH are shims that
-    ask you first. Copilot is untested (not installed).
-- Mouse: drag to select text in a pane (agent text is markdown, tables render); `ctrl+c` copies the selection. `/copy` copies a whole response.
-- Worktrees start from HEAD: uncommitted changes in your tree are not visible to the agents.
+Manual install: `git clone https://github.com/lunagoat/deck && cd deck && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`,
+then run `PYTHONPATH=/path/to/deck /path/to/deck/.venv/bin/python -m deck` from a project folder.
+
+## Use it
+
+```sh
+cd ~/some/project
+deck
+```
+
+Type a task and press Enter. It goes to the **primary agent** (Claude by default; change it with `/primary`). To involve
+others, say so: *"get codex and agy to review this too"*. The primary delegates through `deck-delegate`, each delegate
+gets its own pane, and when they finish deck wakes the primary with their results so it never sits waiting.
+
+- **Pick agents yourself**: `@claude @codex ...` in the prompt, `@all`, or toggle defaults with `alt+1`, `alt+2`... (numbers follow the
+  agents found on your machine).
+- **Replying**: with a task on screen, plain text continues that conversation: the focused pane's agent, otherwise the primary.
+  `@codex ...` sends it to codex's run (an agent not yet in the task joins it). If an agent is busy your message is queued and
+  delivered when it finishes. The input's placeholder always says who you're replying to. `/new` or `/task <prompt>` start something separate.
+- **Worktrees**: in a git repo each run works in its own worktree and branch (`deck/<stamp>-<id>-<agent>` under
+  `~/.local/share/deck/worktrees/`), so agents can't trample each other. In a pane (`Tab` to focus, `Esc` to go back to the prompt):
+  `d` diff, `m` commit and merge into your current branch, `x` stop, `f` follow-up, `D` discard the worktree and branch.
+  Worktrees start from `HEAD`: uncommitted changes in your tree aren't visible to the agents.
+- **Panes**: finished panes hide while something else is working and the main conversation stays open when everyone is idle.
+  `alt+h` shows all, `/panes` or `alt+p` picks which stay open. Repeated `/resume` opens separate saved conversations
+  side by side (`claude-2`, ... reply with `@claude-2`).
+- **Text**: agent output is rendered as markdown (tables included). Drag to select, `ctrl+c` copies, `/copy` copies a whole response.
+
+### Commands
+
+Type `/` for a menu (up/down, `Tab` completes, `Enter` runs). Names follow Claude Code's where the idea fits.
+
+| Command | What it does |
+|---|---|
+| `/new` (`/clear`, `/reset`) | blank slate; the old task stays in the list |
+| `/task [@agents] <prompt>` | start a separate task while another is on screen |
+| `/resume [all]` | continue an old session (Claude, Codex, opencode, and anything deck ran) |
+| `/model`, `/effort` (`alt+e`) | pick models / reasoning effort per agent; stays open so you can set several |
+| `/primary [agent]` | which agent new tasks start with |
+| `/plan <task>` | agents propose a plan and change nothing |
+| `/compact [focus]` | summarise a Claude session's context (Claude only) |
+| `/diff`, `/cost`, `/export [file]`, `/copy`, `/rename`, `/stop`, `/cd <path>` | inspect and manage the current task |
+| `/usage [refresh [claude]]` (`alt+u`) | limit bars for every agent |
+| `/status` (`/doctor`), `/rescan` (`alt+r`), `/config`, `/help`, `/exit` | setup |
+
+Anything else starting with `/` is sent to the agent as an ordinary prompt (a Claude skill, say). The agents' own built-in
+TUI commands don't exist when they run headless, so deck reimplements the ones that make sense for a dashboard.
+
+## Agents
+
+deck looks for each CLI on `PATH` and in the usual install dirs (`~/.local/bin`, `~/.cargo/bin`, `~/.bun/bin`,
+`~/.npm-global/bin`, Homebrew...), and only offers the ones it finds. Installed something new? `/rescan`.
+`deck --agents` lists what it sees.
+
+| Agent | How deck drives it | Permissions | Tested |
+|---|---|---|---|
+| Claude Code | `claude -p` stream-json, its own permission mode (`auto` by default) | its own rules; whatever it asks comes to you | yes |
+| Codex | `codex app-server` (JSON-RPC), `on-request` policy in its workspace sandbox | its own rules; asks before `rm` and anything the sandbox blocks | yes |
+| opencode | ACP (`opencode acp`) | its own asks reach you; also fenced, `rm` & co ask | yes |
+| Antigravity (`agy`) | `agy -p` stream-json | can't ask when headless: fenced, `rm` & co ask | yes |
+| Copilot CLI | `copilot -p`, plain text | can't ask when headless: fenced | barely; its JSON mode isn't used yet |
+| Gemini CLI, Cursor, Qwen Code, Cline, Kiro, Goose, Kilo, Augment, Mistral Vibe, Junie | ACP (`gemini --acp`, `cursor-agent acp`, ...) | their own asks reach you; also fenced | **no** |
+
+Popular CLIs deck can't drive yet (no ACP server mode that could be verified): Aider, Amp, Crush, Droid, Plandex, OpenHands.
+`/status` tells you which of them you have.
+
+**Add your own** in `~/.config/deck/config.toml`. If it speaks ACP (real approve/deny, resumable sessions):
+
+```toml
+[agents.myagent]
+acp = ["myagent", "--acp"]     # the command that starts its ACP server on stdio
+fenced = true                  # default; false turns the sandbox off for an agent whose own asking you trust
+```
+
+Otherwise give a headless command; it runs fenced, output is plain text, no resume:
+
+```toml
+[agents.mytool]
+command = ["mytool", "-p", "{prompt}"]   # {prompt} and {model} are filled in
+model_flag = ["--model", "{model}"]      # optional
+color = "#4285f4"                        # optional
+```
+
+## Safety
+
+deck never passes a skip-permissions or bypass flag to any agent. Where an agent has its own safeguards deck uses them
+and only supplies the answers, as a dialog: `y` allow once, `a` allow that kind of thing for this run, `n` or `Esc` deny.
+`a` is never offered for `rm`, `git push` and other dangerous commands (`deck/safety.py`), and a yes to an exact command is
+remembered for two minutes so two layers asking about the same `rm` don't prompt twice. If deck can't ask you, it says no.
+
+Some agents can't ask at all when run headless (Antigravity's print mode runs everything), and some default to asking
+about nothing (opencode doesn't ask about `rm`). For those deck builds the rules itself (`deck/sandbox.py`):
+
+- **bubblewrap** makes the whole filesystem read-only except the run's own folder (plus the repo's `.git` for worktrees, a private
+  `/tmp`, and the agent's own state directory), so `rm -rf ~` can't touch anything that matters;
+- **shims** for `rm`, `rmdir`, `shred`, `dd`, `truncate`, `sudo`, `kill`... sit first on `PATH` and ask you before running the real
+  command. An agent that calls `/usr/bin/rm` by absolute path skips the shim but is still stuck inside the fence.
+
+Claude's `auto` mode ran an explicitly requested `rm -rf` without asking in testing; if you want more stops use
+`/config claude_mode=manual` (asks about nearly everything) or `acceptEdits`, or set `claude_mode` in `config.toml`.
+
+The fence guesses where unfamiliar ACP agents keep their state (`~/.name`, `~/.config/name`, ...); an agent that needs to write
+elsewhere may fail inside it.
+
+## Usage bars
+
+A strip above the input shows each agent's limit windows as progress bars with reset countdowns (`alt+u` collapses it to one
+line, `/usage` has the detail). Claude's come from the `rate_limit_event` in its output stream, so they update whenever Claude runs
+(`/usage refresh claude` makes one tiny Haiku turn, which counts against your limit). Codex's are read live from
+`codex app-server`. Readings are saved between sessions. Antigravity, opencode and Copilot don't expose limits through their
+CLIs, so `/usage` says so instead of guessing.
+
+## Configuration
+
+`~/.config/deck/config.toml` (all optional):
+
+```toml
+worktrees = true            # one git worktree per run
+claude_mode = "auto"        # auto | manual | acceptEdits   (Claude's own permission modes)
+default_agents = ["claude"] # the primary agent
+auto_checkin = true         # wake a primary when its delegates finish
+max_checkins = 10           # per run, so agents can't wake each other forever
+max_depth = 2               # a delegate may delegate once more
+max_delegations = 8         # per task
+```
+
+State lives in `~/.local/state/deck` (chosen models and efforts, saved sessions, usage readings).
+
+## Development
+
+```sh
+.venv/bin/python tests/smoke_commands.py     # commands, adapters, safety rules
+.venv/bin/python tests/smoke_permissions.py  # confirm/deny dialogs and the permission MCP server
+.venv/bin/python tests/smoke_detect.py       # agent detection, /rescan, custom agents
+.venv/bin/python tests/smoke_flow.py         # replies, queueing, check-ins, polling, usage bars
+.venv/bin/python tests/smoke_acp.py          # the ACP driver, against tests/fake_acp_agent.py
+.venv/bin/python tests/smoke_install.py      # install.sh against a throwaway copy (needs network)
+```
+
+The tests are headless and never start a real agent. They run in a temp dir and can't touch your deck state or repos.
+The code is about a dozen small modules under `deck/`; `adapters.py` (how each agent is launched), `core.py` (runs, worktrees,
+delegation) and `app.py` (the UI) are the places to start.

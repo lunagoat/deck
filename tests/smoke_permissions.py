@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-os.environ["XDG_STATE_HOME"] = str(ROOT / ".scratch" / "state")
+import _env  # noqa: E402,F401  (throwaway state; must come before deck is imported)
 sys.path.insert(0, str(ROOT))
 
 from textual.widgets import Markdown  # noqa: E402
@@ -36,7 +36,7 @@ Done."""
 
 
 async def main():
-    work = ROOT / ".scratch" / "permwork"
+    work = _env.BASE / "permwork"
     work.mkdir(parents=True, exist_ok=True)
     os.chdir(work)
     app = DeckApp()

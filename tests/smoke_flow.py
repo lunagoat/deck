@@ -11,9 +11,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-os.environ["XDG_STATE_HOME"] = str(ROOT / ".scratch" / "flow-state")
+import _env  # noqa: E402,F401  (throwaway state; must come before deck is imported)
 sys.path.insert(0, str(ROOT))
-os.makedirs(ROOT / ".scratch", exist_ok=True)
 
 from deck import core, usage  # noqa: E402
 from deck.app import DeckApp, DiffScreen  # noqa: E402
@@ -36,7 +35,7 @@ CODEX_LIMITS = {"limitId": "codex", "primary": {"usedPercent": 25, "windowDurati
 
 
 async def main():
-    os.chdir(ROOT / ".scratch")
+    os.chdir(_env.BASE)
     app = DeckApp()
     sent: list[tuple[str, str]] = []   # (run label, prompt) for everything deck would have launched
 

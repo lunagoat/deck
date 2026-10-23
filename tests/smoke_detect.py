@@ -9,7 +9,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-FAKE = ROOT / ".scratch" / "detect"
+import _env  # noqa: E402
+
+FAKE = _env.BASE / "detect"
 shutil.rmtree(FAKE, ignore_errors=True)
 BIN, HOME = FAKE / "bin", FAKE / "home"
 for d in (BIN, HOME / ".local" / "bin", HOME / ".config" / "deck"):

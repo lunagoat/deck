@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-os.environ["XDG_STATE_HOME"] = str(ROOT / ".scratch" / "state")  # keep real models/efforts untouched
+import _env  # noqa: E402,F401  (throwaway state; must come before deck is imported)
 sys.path.insert(0, str(ROOT))
 
 from deck.adapters import ACP_KNOWN, make_adapters  # noqa: E402
@@ -24,7 +24,7 @@ def check(name: str, ok: bool, detail: str = ""):
 
 
 async def main():
-    work = ROOT / ".scratch" / "cmdwork"
+    work = _env.BASE / "cmdwork"
     work.mkdir(parents=True, exist_ok=True)
     os.chdir(work)
 
@@ -139,7 +139,7 @@ async def main():
         check("/config rejects unknown keys", any("can't set" in m for m in msgs), str(msgs))
 
         await cmd("/cd ..")
-        check("/cd moves", Path(os.getcwd()) == ROOT / ".scratch", os.getcwd())
+        check("/cd moves", Path(os.getcwd()) == _env.BASE, os.getcwd())
         os.chdir(work)
 
         await cmd("/stop")

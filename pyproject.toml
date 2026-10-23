@@ -3,4 +3,4 @@ name = "deck"
 version = "0.1.0"
 description = "Terminal dashboard that fans tasks out to Claude, Codex, opencode, Antigravity and Copilot"
 requires-python = ">=3.11"
-dependencies = ["textual"]
+dependencies = ["textual>=8.2.8,<9"]

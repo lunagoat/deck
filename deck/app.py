@@ -5,7 +5,10 @@ import asyncio
 import json
 import os
 import re
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 from rich.markup import escape
 from rich.text import Text
@@ -20,7 +23,7 @@ from textual.widgets.option_list import Option
 from .adapters import EFFORTS, ORDER, make_adapters
 from .commands import Cmd, lookup, matches
 from .safety import danger
-from . import detect, usage as usage_view
+from . import __version__, detect, usage as usage_view
 from .core import Hub, Run, Task, load_config, route
 from .models import list_models
 from .sessions import find_sessions, transcript
@@ -962,9 +965,49 @@ class DeckApp(App):
             self._render_tasks()
 
 
-def main():
-    DeckApp().run()
+HELP = """usage: deck [--agents | --version | --update | --help]
+
+  (no option)   open the dashboard in the current folder
+  --agents      list the coding agents deck found on this machine, then exit
+  --version     print the version
+  --update      fast-forward this install to the latest commit (a git checkout)
+
+Inside deck, type / for commands. See the README."""
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if not args:
+        DeckApp().run()
+        return 0
+    flag = args[0]
+    if flag in ("-h", "--help"):
+        print(HELP)
+    elif flag in ("-V", "--version"):
+        print(f"deck {__version__}")
+    elif flag == "--agents":
+        load_config()  # registers [agents.*] from config.toml
+        adapters = make_adapters()
+        found = detect.scan(adapters)
+        for name in ORDER:
+            if name in found:
+                print(f"{name:<10}{found[name].path}")
+        if not found:
+            print("none found: install one of " + ", ".join(ORDER[:5]) + " and log in")
+        else:
+            print("\nnot installed: " + (", ".join(n for n in ORDER if n not in found) or "none"))
+        extra = detect.scan_unsupported(adapters)
+        if extra:
+            print("\nalso installed, not supported yet: " + ", ".join(extra))
+    elif flag == "--update":
+        root = Path(__file__).resolve().parent.parent
+        r = subprocess.run(["git", "-C", str(root), "pull", "--ff-only"], text=True)
+        return r.returncode
+    else:
+        print(f"deck: unknown option {flag}\n\n{HELP}", file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
