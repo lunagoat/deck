@@ -13,7 +13,7 @@ PERMISSION_MCP = BIN / "deck-permission-mcp"
 
 @dataclass
 class Ev:
-    """A parsed output event. kind: text | tool | info | error | done."""
+    """A parsed output event. kind: text | thought | tool | tool_output | info | error | done."""
     kind: str
     text: str = ""
     meta: dict = field(default_factory=dict)  # session, tokens, cost
@@ -29,7 +29,7 @@ def _tool_summary(name: str, inp) -> str:
         for k in ("command", "CommandLine", "file_path", "TargetFile", "AbsolutePath", "path",
                   "pattern", "Query", "url", "query", "description"):
             if k in inp:
-                return f"{name}: {_short(inp[k])}"
+                return f"{name}: {inp[k] if k in ('command', 'CommandLine') else _short(inp[k])}"
         if inp:
             return f"{name}: {_short(next(iter(inp.values())))}"
     return f"{name}: {_short(inp)}" if inp else name
@@ -39,11 +39,23 @@ def _tool_summary(name: str, inp) -> str:
 
 def parse_claude(d: dict) -> list[Ev]:
     t = d.get("type")
+    if t == "user":
+        out = []
+        for b in d.get("message", {}).get("content", []):
+            if isinstance(b, dict) and b.get("type") == "tool_result":
+                content = b.get("content", "")
+                if isinstance(content, list):
+                    content = "\n".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text")
+                if isinstance(content, str) and content:
+                    out.append(Ev("tool_output", content))
+        return out
     if t == "assistant":
         out = []
         for b in d.get("message", {}).get("content", []):
             if b.get("type") == "text" and b.get("text", "").strip():
                 out.append(Ev("text", b["text"]))
+            elif b.get("type") == "thinking" and b.get("thinking"):
+                out.append(Ev("thought", b["thinking"]))
             elif b.get("type") == "tool_use" and b.get("name") == "ExitPlanMode":
                 out.append(Ev("text", str(b.get("input", {}).get("plan", "(plan ready)"))))  # /plan's answer
             elif b.get("type") == "tool_use":
@@ -72,6 +84,8 @@ def parse_opencode(d: dict, _seen: set | None = None) -> list[Ev]:
     meta = {"session": sid} if sid else {}
     if t == "text":
         return [Ev("text", p.get("text", ""), meta)]
+    if t == "reasoning":
+        return [Ev("thought", p.get("text", ""), meta)]
     if t == "tool_use" or p.get("type") == "tool":
         st = p.get("state", {})
         if st.get("status") in ("running", "completed", "pending") or t == "tool_use":

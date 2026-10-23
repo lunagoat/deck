@@ -55,6 +55,23 @@ async def cmd_panes(app, rest: str):
     app.action_pick_panes()
 
 
+async def cmd_image(app, rest: str):
+    if rest == "clear":
+        app.pending_images.clear()
+        app._render_attachments()
+    elif rest == "retry" or rest.startswith("retry "):
+        label = rest.partition(" ")[2]
+        run = (app.current.runs.get(label) if app.current and label else app.follow or app.reply_target())
+        if not run or not run.last_images:
+            return app.flash("no previous images for this conversation; use /image retry <pane-label> or paste again")
+        app.pending_images = list(run.last_images)
+        app._render_attachments()
+    elif rest:
+        app.attach_image(rest.strip().strip("\"'"))
+    else:
+        await app.action_paste_clipboard()
+
+
 async def cmd_compact(app, rest: str):
     run = app.target_run()
     if not run:
@@ -297,6 +314,7 @@ COMMANDS: list[Cmd] = [
     Cmd("/primary", "[agent]", "which agent new tasks start with (it delegates to the others)", cmd_primary),
     Cmd("/resume", "[all]", "open another saved conversation beside the current panes", cmd_resume, ("/continue",)),
     Cmd("/panes", "", "choose conversations to keep open (alt+p)", cmd_panes),
+    Cmd("/image", "[path|clear|retry [pane]]", "attach clipboard image or file; recover a previous attachment", cmd_image),
     Cmd("/model", "[agent model|default]", "choose models; stays open to set several", cmd_model, ("/models",)),
     Cmd("/effort", "[agent level|default]", "choose reasoning effort; stays open too", cmd_effort),
     Cmd("/plan", "<task>", "agents plan without changing files", cmd_plan),

@@ -92,7 +92,7 @@ async def read_rate_limits(exe: str = "codex", timeout: float = 20) -> dict | No
 
 
 async def drive(hub, run, prompt: str, session: str | None, *, model: str, effort: str, plan: bool,
-                cwd: str, env: dict, apply: Apply, exe: str = "codex") -> int:
+                cwd: str, env: dict, apply: Apply, exe: str = "codex", images=()) -> int:
     """Run one turn. Returns a process-style exit code: 0 completed, 1 failed."""
     proc = await asyncio.create_subprocess_exec(
         exe, "app-server", cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE,
@@ -105,6 +105,7 @@ async def drive(hub, run, prompt: str, session: str | None, *, model: str, effor
             pass
     rpc = Rpc(proc)
     items: dict[str, dict] = {}          # item id -> item, so file-change approvals know the paths
+    streamed_thoughts: set[str] = set()
     turn_done = asyncio.Event()
     outcome = {"rc": 1}
     root = os.path.realpath(cwd)
@@ -148,11 +149,17 @@ async def drive(hub, run, prompt: str, session: str | None, *, model: str, effor
             items[item.get("id")] = item
             kind = item.get("type")
             if kind == "commandExecution":
-                apply(Ev("tool", "bash: " + _short(inner_command(item.get("command", "")))))
+                apply(Ev("tool", "bash: " + inner_command(item.get("command", ""))))
             elif kind in ("mcpToolCall", "webSearch", "dynamicToolCall"):
                 apply(Ev("tool", _short(item.get("tool") or item.get("query") or kind)))
         elif method == "item/completed":
             kind = item.get("type")
+            if kind == "reasoning":
+                summary = item.get("summary") or []
+                if summary and item.get("id") not in streamed_thoughts:
+                    apply(Ev("thought", "\n".join(summary)))
+            elif kind == "commandExecution" and item.get("aggregatedOutput"):
+                apply(Ev("tool_output", item["aggregatedOutput"]))
             if kind == "agentMessage" and (item.get("text") or "").strip():
                 apply(Ev("text", item["text"]))
             elif kind == "fileChange" and item.get("status") == "completed":
@@ -160,6 +167,11 @@ async def drive(hub, run, prompt: str, session: str | None, *, model: str, effor
                 apply(Ev("tool", "edit: " + _short(files)))
             elif kind == "commandExecution" and item.get("status") in ("declined", "failed"):
                 apply(Ev("tool", f"({item.get('status')}) " + _short(inner_command(item.get("command", "")))))
+        elif method == "item/reasoning/summaryTextDelta":
+            streamed_thoughts.add(p.get("itemId"))
+            apply(Ev("thought", p.get("delta", ""), {"delta": True}))
+        elif method == "item/reasoning/summaryPartAdded":
+            apply(Ev("thought", "\n", {"delta": True}))
         elif method == "account/rateLimits/updated":
             apply(Ev("info", "", {"usage_codex": p.get("rateLimits") or p}))
         elif method == "thread/tokenUsage/updated":
@@ -206,7 +218,7 @@ async def drive(hub, run, prompt: str, session: str | None, *, model: str, effor
             started = await rpc.call("thread/start", base)
         thread = started.get("thread", {}).get("id") or session
         apply(Ev("info", "", {"session": thread}))
-        turn = {"threadId": thread, "input": [{"type": "text", "text": prompt}]}
+        turn = {"threadId": thread, "input": [{"type": "text", "text": prompt}, *[im.codex() for im in images]]}
         if effort:
             turn["effort"] = effort
         await rpc.call("turn/start", turn)

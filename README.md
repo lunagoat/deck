@@ -53,6 +53,16 @@ gets its own pane, and when they finish deck wakes the primary with their result
   `alt+h` shows all, `/panes` or `alt+p` picks which stay open. Repeated `/resume` opens separate saved conversations
   side by side (`claude-2`, ... reply with `@claude-2`).
 - **Text**: agent output is rendered as markdown (tables included). Drag to select, `ctrl+c` copies, `/copy` copies a whole response.
+  Thoughts, responses, commands/tools, and tool output have separate labels and styling. Thoughts appear only when
+  an agent emits them; deck does not infer them from response text.
+- **Images**: `Ctrl+V` pastes clipboard images (`Alt+I` if your terminal intercepts it), or use `/image /path/to/image.png`.
+  Pasted image file paths work too. Attached filenames appear above the prompt; `/image clear` removes them.
+  `/image retry [pane-label]` restores that conversation's last images after an agent rejects or fails a turn.
+  Send text with images, or press Enter with only images attached. Queued replies retain their images.
+  Supports PNG, JPEG, GIF and WebP, up to 20 MiB each. Clipboard access needs `wl-paste` on Wayland or `xclip` on X11;
+  `/image <path>` works without either. Images stay in memory rather than being saved in the repo.
+  Native image input works with Claude, Codex, and ACP agents advertising image support (the model must also support it).
+  The current agy, Copilot and plain custom adapters do not accept attachments.
 
 ### Commands
 

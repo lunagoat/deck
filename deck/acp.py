@@ -58,7 +58,7 @@ def permission_input(tool_call: dict) -> tuple[str, dict]:
 
 
 async def drive(hub, run, prompt: str, session: str | None, *, argv: list[str], model: str, effort: str,
-                plan: bool, cwd: str, env: dict, apply: Apply) -> int:
+                plan: bool, cwd: str, env: dict, apply: Apply, images=()) -> int:
     """Run one turn against an ACP agent started with `argv`. Returns 0 on a clean end_turn."""
     proc = await asyncio.create_subprocess_exec(
         *argv, cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -73,6 +73,7 @@ async def drive(hub, run, prompt: str, session: str | None, *, argv: list[str], 
     stderr_tail: deque[str] = deque(maxlen=6)
     tools: dict[str, dict] = {}       # toolCallId -> what we know so far
     shown: set[str] = set()
+    tool_outputs: dict[str, str] = {}
     state = {"stop": None, "replaying": False}
 
     async def drain_stderr():
@@ -82,17 +83,17 @@ async def drive(hub, run, prompt: str, session: str | None, *, argv: list[str], 
     def tool_line(tc: dict) -> str:
         raw = tc.get("rawInput") or {}
         if tc.get("kind") == "execute" and raw.get("command"):
-            return "bash: " + _short(raw["command"])
+            return "bash: " + str(raw["command"])
         return _short(tc.get("title") or tc.get("name") or tc.get("kind") or "tool")
 
     def on_update(u: dict):
         kind = u.get("sessionUpdate")
         if state["replaying"]:   # session/load re-sends the old conversation; deck already has it
             return
-        if kind == "agent_message_chunk":
+        if kind in ("agent_message_chunk", "agent_thought_chunk"):
             c = u.get("content") or {}
             if c.get("type") == "text" and c.get("text"):
-                apply(Ev("text", c["text"], {"delta": True}))
+                apply(Ev("thought" if kind == "agent_thought_chunk" else "text", c["text"], {"delta": True}))
         elif kind in ("tool_call", "tool_call_update"):
             tc = tools.setdefault(u.get("toolCallId", "?"), {})
             tc.update({k: v for k, v in u.items() if v is not None})
@@ -103,6 +104,13 @@ async def drive(hub, run, prompt: str, session: str | None, *, argv: list[str], 
                 apply(Ev("tool", tool_line(tc)))
             if status == "failed" and u.get("sessionUpdate") == "tool_call_update":
                 apply(Ev("tool", "(failed) " + tool_line(tc)))
+            output = "\n".join(c["content"].get("text", "") for c in tc.get("content", [])
+                               if c.get("type") == "content" and c.get("content", {}).get("type") == "text")
+            key = u.get("toolCallId", "?")
+            previous = tool_outputs.get(key, "")
+            if output and output != previous:
+                apply(Ev("tool_output", output[len(previous):] if output.startswith(previous) else output))
+                tool_outputs[key] = output
         elif kind == "usage_update":
             meta = {"tokens": u.get("used")} if u.get("used") is not None else {}
             cost = (u.get("cost") or {}).get("amount")
@@ -149,6 +157,8 @@ async def drive(hub, run, prompt: str, session: str | None, *, argv: list[str], 
         if init.get("protocolVersion") != PROTOCOL:
             raise RuntimeError(f"agent speaks ACP v{init.get('protocolVersion')}, deck speaks v{PROTOCOL}")
         caps = init.get("agentCapabilities") or {}
+        if images and not (caps.get("promptCapabilities") or {}).get("image"):
+            raise RuntimeError("this ACP agent does not advertise image input support; recover attachments with /image retry")
         base = {"cwd": cwd, "mcpServers": []}
 
         info: dict = {}
@@ -190,7 +200,8 @@ async def drive(hub, run, prompt: str, session: str | None, *, argv: list[str], 
             elif legacy:
                 await rpc.call("session/set_mode", {"sessionId": sid, "modeId": legacy})
 
-        result = await rpc.call("session/prompt", {"sessionId": sid, "prompt": [{"type": "text", "text": prompt}]})
+        result = await rpc.call("session/prompt", {"sessionId": sid, "prompt": [
+            {"type": "text", "text": prompt}, *[im.acp() for im in images]]})
         usage = result.get("usage") or {}
         if usage.get("totalTokens"):
             apply(Ev("info", "", {"tokens": usage["totalTokens"]}))

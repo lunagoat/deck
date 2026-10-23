@@ -5,10 +5,12 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from rich.markup import escape
 from rich.text import Text
@@ -27,6 +29,7 @@ from . import __version__, detect, usage as usage_view
 from .core import Hub, Run, Task, load_config, route
 from .models import list_models
 from .sessions import find_sessions, transcript
+from .images import Image, Prompt, clipboard
 
 ADAPTERS = make_adapters()
 EMPTY = ("No tasks yet. Type below and press Enter.\n\n"
@@ -46,6 +49,14 @@ def fmt_tokens(n: int | None) -> str:
     if not n:
         return ""
     return f"{n / 1000:.1f}k tok" if n >= 1000 else f"{n} tok"
+
+
+class PromptInput(Input):
+    def _on_paste(self, event: events.Paste):
+        if self.app.attach_pasted_paths(event.text):
+            event.stop()
+            return
+        super()._on_paste(event)
 
 
 class DiffScreen(ModalScreen):
@@ -317,8 +328,8 @@ class MdBlock:
     Markdown.update() is asynchronous and overlapping calls clobber each other, so updates are
     coalesced: at most one in flight, and it always ends on the latest text."""
 
-    def __init__(self, log: VerticalScroll):
-        self.log, self.text, self.widget = log, "", None
+    def __init__(self, log: VerticalScroll, kind: str = "text"):
+        self.log, self.kind, self.text, self.widget = log, kind, "", None
         self.mounted = None
         self.dirty = self.busy = False
 
@@ -328,7 +339,10 @@ class MdBlock:
 
     def kick(self):
         if self.widget is None:  # first render: the widget parses everything gathered so far
-            self.widget = Markdown(self.text)
+            cls = "thought-block" if self.kind == "thought" else "response-block text-block"
+            title = "thought" if self.kind == "thought" else "response"
+            self.widget = Markdown(self.text, classes=cls)
+            self.widget.border_title = title
             self.mounted = self.log.mount(self.widget)
             self.dirty = False
         elif self.dirty and not self.busy:
@@ -366,6 +380,8 @@ class RunPane(Vertical, can_focus=True):
         self.shown = 0
         self.follow_tail = True
         self.block: MdBlock | None = None  # the agent-text block still being appended to
+        self.out_block: Static | None = None  # tool_output block still being appended to
+        self.out_text: str = ""
         self._discard_armed = 0.0
 
     def compose(self) -> ComposeResult:
@@ -401,18 +417,49 @@ class RunPane(Vertical, can_focus=True):
         log = self.query_one("#log", VerticalScroll)
         new = r.lines[self.shown:]
         for kind, text in new:
-            if kind == "text" and not text.startswith("──"):
-                # consecutive text lines are one markdown document, so tables and lists survive
-                self.block = self.block or MdBlock(log)
+            if kind in ("text", "thought") and not text.startswith("──"):
+                # consecutive lines of the same kind are one markdown document
+                if self.out_block:
+                    self.out_block = None
+                    self.out_text = ""
+                if self.block and self.block.kind != kind:
+                    self.block.kick()
+                    self.block = None
+                self.block = self.block or MdBlock(log, kind=kind)
                 self.block.append(text)
                 continue
             if self.block:
                 self.block.kick()  # its widget must be mounted before whatever comes after it
                 self.block = None
-            line = (Text("▸ " + text, style="grey62 italic") if kind == "tool"
-                    else Text("✗ " + text, style="red") if kind == "error"
-                    else Text(text, style="cyan"))
-            log.mount(Static(line, classes="entry"))
+            if kind == "tool_output":
+                text_clean = text.rstrip("\n")
+                if self.out_block is not None:
+                    self.out_text = f"{self.out_text}\n{text_clean}" if self.out_text else text_clean
+                    out_t = Text.from_ansi(self.out_text)
+                    if not out_t.spans:
+                        out_t.stylize("#94e2d5")
+                    self.out_block.update(out_t)
+                else:
+                    self.out_text = text_clean
+                    out_t = Text.from_ansi(self.out_text)
+                    if not out_t.spans:
+                        out_t.stylize("#94e2d5")
+                    self.out_block = Static(out_t, classes="entry tool-output-block output-block")
+                    self.out_block.border_title = "tool output"
+                    log.mount(self.out_block)
+                continue
+            if self.out_block:
+                self.out_block = None
+                self.out_text = ""
+            if kind == "tool":
+                line = Text("▸ " + text, style="bold #f9e2af")
+                w = Static(line, classes="entry tool-block command-block")
+                w.border_title = "tool / command"
+                log.mount(w)
+            elif kind == "error":
+                log.mount(Static(Text("✗ " + text, style="red"), classes="entry error-block"))
+            else:
+                log.mount(Static(Text(text, style="cyan"), classes="entry"))
         if self.block:
             self.block.kick()
         if new:
@@ -472,6 +519,45 @@ class DeckApp(App):
     RunPane .entry { height: auto; background: transparent; }
     RunPane Markdown { height: auto; margin: 0; padding: 0; background: transparent; }
     RunPane Markdown > * { background: transparent; }
+    RunPane .thought-block {
+        border: round #6c7086;
+        border-title-color: #a6adc8;
+        border-title-style: bold;
+        color: #a6adc8;
+        padding: 0 1;
+        margin: 0 0 1 0;
+        background: transparent;
+    }
+    RunPane .thought-block MarkdownParagraph {
+        color: #a6adc8;
+    }
+    RunPane .response-block {
+        border: round #89b4fa;
+        border-title-color: #89b4fa;
+        border-title-style: bold;
+        color: #cdd6f4;
+        padding: 0 1;
+        margin: 0 0 1 0;
+        background: transparent;
+    }
+    RunPane .tool-block {
+        border: round #f9e2af;
+        border-title-color: #f9e2af;
+        border-title-style: bold;
+        color: #f9e2af;
+        padding: 0 1;
+        margin: 0 0 1 0;
+        background: transparent;
+    }
+    RunPane .tool-output-block {
+        border: round #89dceb;
+        border-title-color: #89dceb;
+        border-title-style: bold;
+        color: #94e2d5;
+        padding: 0 1;
+        margin: 0 0 1 0;
+        background: transparent;
+    }
     * { scrollbar-size-vertical: 1; scrollbar-background: transparent; scrollbar-background-hover: transparent;
         scrollbar-background-active: transparent; scrollbar-color: $primary 40%; scrollbar-corner-color: transparent; }
     RunPane #foot { height: auto; max-height: 2; padding: 0 1; }
@@ -497,6 +583,8 @@ class DeckApp(App):
         Binding("alt+u", "toggle_usage", "usage"),
         Binding("alt+h", "toggle_finished", "finished panes"),
         Binding("alt+p", "pick_panes", "pick panes"),
+        Binding("ctrl+v", "paste_clipboard", "paste", priority=True),
+        Binding("alt+i", "paste_clipboard", "paste image", show=False),
         *[Binding(f"alt+{i + 1}", f"toggle_agent({i})", show=False) for i in range(9)],
     ]
 
@@ -518,6 +606,7 @@ class DeckApp(App):
         self.usage_full = True  # alt+u: one line per agent, or everything on one line
         self.show_finished = False
         self.pinned_panes: set[int] = set()
+        self.pending_images: list[Image] = []
         self._dirty_tasks = True
 
     # -- layout ------------------------------------------------------------------
@@ -532,11 +621,13 @@ class DeckApp(App):
                 yield OptionList(id="slash")
                 yield Static(id="usage")
                 yield Static(id="chips")
-                yield Input(placeholder="describe a task…", id="prompt")
+                yield Static(id="attachments")
+                yield PromptInput(placeholder="describe a task…", id="prompt")
         yield Footer()
 
     async def on_mount(self):
         await self.hub.serve()
+        self._render_attachments()
         self.query_one("#prompt", Input).focus()
         self.set_interval(1.0, self._tick)
         self.set_interval(20.0, self._render_usage)  # countdowns
@@ -602,7 +693,7 @@ class DeckApp(App):
         @agent (or @label) sends it to that run instead; an agent not in the task yet joins it."""
         task = self.current
         tags = re.findall(r"(?<!\S)@([\w-]+)", text)
-        body = re.sub(r"(?<!\S)@[\w-]+\s*", "", text).strip() or text
+        body = Prompt(re.sub(r"(?<!\S)@[\w-]+\s*", "", text).strip() or text, getattr(text, "images", ()))
         said = []
         if not tags:
             run = self.reply_target()
@@ -620,6 +711,67 @@ class DeckApp(App):
         self.flash("; ".join(said))
 
     # -- slash command menu ----------------------------------------------------------
+    def _render_attachments(self):
+        box = self.query_one("#attachments", Static)
+        box.styles.height = "auto"
+        box.display = bool(self.pending_images)
+        box.update(Text("Images: " + ", ".join(i.name for i in self.pending_images)
+                        + " · /image clear removes them", style="bold cyan"))
+
+    def attach_image(self, path: str):
+        try:
+            self.pending_images.append(Image.from_path(path))
+            self._render_attachments()
+        except (OSError, ValueError) as exc:
+            self.flash(f"image: {exc}")
+
+    def attach_pasted_paths(self, text: str) -> bool:
+        try:
+            paths = shlex.split(text)
+        except ValueError:
+            return False  # Ordinary pasted prose can contain unmatched quotes.
+        try:
+            paths = [unquote(urlparse(p).path) if p.startswith("file://") else p for p in paths]
+            if not paths or not all(Path(p).suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp")
+                                    and Path(p).expanduser().is_file() for p in paths):
+                return False
+            images = [Image.from_path(p) for p in paths]
+            self.pending_images.extend(images)
+            self._render_attachments()
+            return True
+        except (OSError, ValueError) as exc:
+            self.flash(f"image: {exc}")
+            return True
+
+    async def action_paste_clipboard(self):
+        if len(self.screen_stack) > 1:
+            return
+        try:
+            content = await clipboard()
+            if isinstance(content, Image):
+                self.pending_images.append(content)
+                self._render_attachments()
+            elif not self.attach_pasted_paths(content):
+                self.query_one("#prompt", Input).insert_text_at_cursor(content)
+            self.query_one("#prompt", Input).focus()
+        except asyncio.TimeoutError:
+            self.flash("paste: clipboard timed out; try again or use /image <path>")
+        except (OSError, ValueError) as exc:
+            self.flash(f"paste: {exc}")
+
+    def _image_targets(self, text):
+        tags = re.findall(r"(?<!\S)@([\w-]+)", text)
+        if self.current:
+            if not tags:
+                target = self.follow or self.reply_target()
+                return [target.agent] if target else []
+            if "all" in tags:
+                return [r.agent for r in self.current.runs.values()]
+            return [self.current.runs[t].agent if t in self.current.runs else t for t in tags]
+        if "all" in tags:
+            return self.agents()
+        return tags or list(self.chosen) or route(text, self.cfg, self.avail)
+
     def on_input_changed(self, e: Input.Changed):
         if e.input.id != "prompt":
             return
@@ -824,11 +976,21 @@ class DeckApp(App):
         text = e.value.strip()
         if self.slash_items and " " not in text:
             text = self._menu_choice()  # enter on a partial command runs the highlighted one
-        if not text:
+        if not text and not self.pending_images:
             return
+        text = text or "Describe the attached images."
+        if not text.startswith("/") and self.pending_images:
+            unsupported = [a for a in self._image_targets(text)
+                           if a not in ADAPTERS or (a not in ("claude", "codex") and ADAPTERS[a].acp is None)]
+            if unsupported:
+                return self.flash("Image input is not supported by: " + ", ".join(unsupported)
+                                  + ". Choose Claude, Codex or an image-capable ACP agent; attachments kept.")
         e.input.value = ""
         if text.startswith("/") and await self._slash(text):
             return
+        text = Prompt(text, self.pending_images)
+        self.pending_images = []
+        self._render_attachments()
         if self.follow and not re.search(r"(?<!\S)@[\w-]+", text):
             run, self.follow = self.follow, None
             self._update_target()
@@ -842,7 +1004,7 @@ class DeckApp(App):
     async def submit_task(self, text: str, plan: bool = False):
         """Start a task. @agent tags win, then the toggled chips, then the default (claude)."""
         tags = re.findall(r"(?<!\S)@(\w+)", text)
-        prompt = re.sub(r"(?<!\S)@\w+\s*", "", text).strip() or text
+        prompt = Prompt(re.sub(r"(?<!\S)@\w+\s*", "", text).strip() or text, getattr(text, "images", ()))
         if "all" in tags:
             agents = self.agents()
         elif tags:
@@ -857,6 +1019,14 @@ class DeckApp(App):
             self.flash(f"auto-routed to {', '.join(agents)}")
         if not agents:
             return self.flash("no agents available")
+        if self.pending_images:  # /task and /plan enter here directly through slash commands.
+            unsupported = [a for a in agents if a not in ("claude", "codex") and ADAPTERS[a].acp is None]
+            if unsupported:
+                return self.flash("Image input is not supported by: " + ", ".join(unsupported)
+                                  + "; attachments kept.")
+            prompt = Prompt(prompt, [*getattr(prompt, "images", ()), *self.pending_images])
+            self.pending_images = []
+            self._render_attachments()
         task = await self.hub.start_task(prompt, agents, os.getcwd(), plan=plan)
         self._dirty_tasks = True
         self.show_task(task)

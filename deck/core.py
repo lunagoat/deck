@@ -119,6 +119,7 @@ class Run:
     merged: bool = False
     proc: asyncio.subprocess.Process | None = None
     partial: str = ""       # streamed text not yet terminated by a newline
+    last_images: tuple = ()  # retained so a rejected/failed image turn can be retried
     on_event: Callable[["Run", str, str], None] | None = None
 
     @property
@@ -147,16 +148,19 @@ class Run:
             out = out[:half] + f"\n[… {len(out) - limit} characters left out …]\n" + out[-half:]
         return out
 
-    def emit_delta(self, chunk: str):
+    def emit_delta(self, chunk: str, kind: str = "text"):
         """Streamed text: only whole lines are shown; the tail waits for its newline."""
+        if getattr(self, "partial_kind", "text") != kind:
+            self.flush()
+        self.partial_kind = kind
         self.partial += chunk
         *done, self.partial = self.partial.split("\n")
         for line in done:
-            self.emit("text", line)
+            self.emit(kind, line)
 
     def flush(self):
         if self.partial.strip():
-            self.emit("text", self.partial)
+            self.emit(getattr(self, "partial_kind", "text"), self.partial)
         self.partial = ""
 
     def emit(self, kind: str, text: str):
@@ -471,7 +475,8 @@ class Hub:
                 self._maybe_checkin(run.parent)
             return
         if run.queued and run.session:
-            n, text, run.queued = len(run.queued), "\n\n".join(run.queued), []
+            from .images import Prompt
+            n, text, run.queued = len(run.queued), Prompt.join_prompts(run.queued), []
             asyncio.create_task(self.follow_up(run, text, f"your queued repl{'ies' if n > 1 else 'y'}: {text[:120]}"))
             return
         for parent in (run, run.parent):  # runs aren't hashable, so no set here
@@ -514,6 +519,9 @@ class Hub:
                 self._maybe_checkin(parent)
 
     async def _run(self, run: Run, prompt: str, use_wt: bool, session: str | None):
+        images = getattr(prompt, "images", ())
+        if images:
+            run.last_images = tuple(images)
         t = run.task
         if run.status == "killed":
             run.queued.clear()
@@ -563,9 +571,9 @@ class Hub:
                     self.usage.set("claude", claude_windows(ev.meta["usage"]))
                 if ev.meta.get("usage_codex") is not None:
                     self.usage.set("codex", *codex_windows(ev.meta["usage_codex"]))
-                if ev.kind == "text" and ev.meta.get("delta"):
-                    run.emit_delta(ev.text)
-                elif ev.kind in ("text", "tool", "error"):
+                if ev.kind in ("text", "thought") and ev.meta.get("delta"):
+                    run.emit_delta(ev.text, ev.kind)
+                elif ev.kind in ("text", "thought", "tool", "tool_output", "error"):
                     run.flush()
                     run.emit(ev.kind, ev.text.replace(run.cwd, ".") if run.cwd else ev.text)
                 if ev.kind == "done":
@@ -578,7 +586,7 @@ class Hub:
                 rc = await codexserver.drive(
                     self, run, ad.with_preamble(prompt, self.preamble(run), session), session,
                     model=run.model, effort=run.effort, plan=run.plan, cwd=run.cwd, env=env, apply=apply,
-                    exe=self.exe("codex"))
+                    exe=self.exe("codex"), images=images)
             elif ad.acp is not None:  # speaks ACP: its own permission asks come to you as dialogs
                 from . import acp
                 argv = [self.exe(run.agent), *ad.acp]
@@ -586,25 +594,44 @@ class Hub:
                     argv, env = sandbox.wrap(argv, env, run.cwd, t.root, ad.name, (ad.binary,))
                 rc = await acp.drive(self, run, ad.with_preamble(prompt, self.preamble(run), session), session,
                                      argv=argv, model=run.model, effort=run.effort, plan=run.plan, cwd=run.cwd,
-                                     env=env, apply=apply)
+                                     env=env, apply=apply, images=images)
             else:
                 cmd = ad.cmd(prompt, run.cwd, session, model=run.model, effort=run.effort, plan=run.plan,
                              preamble=self.preamble(run), delegate=str(DELEGATE))
                 cmd[0] = self.exe(run.agent)
+                payload = None
+                if images:
+                    if ad.name != "claude":
+                        raise RuntimeError(f"{ad.name}'s current adapter does not support image input")
+                    cmd.pop(cmd.index("-p") + 1)
+                    cmd += ["--input-format", "stream-json"]
+                    payload = (json.dumps({"type": "user", "message": {"role": "user", "content": [
+                        {"type": "text", "text": str(prompt)}, *[im.claude() for im in images]]}}) + "\n").encode()
                 if ad.sandboxed:  # can't ask for itself: fence it in and put a guard in front of rm & co
                     cmd, env = sandbox.wrap(cmd, env, run.cwd, t.root, ad.name, (ad.binary,))
                 run.proc = await asyncio.create_subprocess_exec(
-                    *cmd, cwd=run.cwd, env=env, stdin=asyncio.subprocess.DEVNULL,
+                    *cmd, cwd=run.cwd, env=env, stdin=asyncio.subprocess.PIPE if payload else asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, limit=1 << 24)
                 if run.status == "killed":
                     try:
                         run.proc.terminate()
                     except ProcessLookupError:
                         pass
+
+                async def feed():
+                    if payload:
+                        run.proc.stdin.write(payload)
+                        await run.proc.stdin.drain()
+                        run.proc.stdin.close()
+                feed_task = asyncio.create_task(feed())
                 async for raw in run.proc.stdout:
                     for ev in ad.parse(raw.decode(errors="replace").rstrip("\n")):
                         apply(ev)
                 rc = await run.proc.wait()
+                try:
+                    await feed_task
+                except (BrokenPipeError, ConnectionResetError) as exc:
+                    raise RuntimeError("agent closed its input before receiving all attachments; use /image retry") from exc
             run.flush()
             if run.status != "killed":
                 run.status = "done" if (rc == 0 and finished_ok is not False) else "failed"
