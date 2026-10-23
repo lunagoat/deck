@@ -78,11 +78,16 @@ async def cmd_rename(app, rest: str):
 
 async def cmd_stop(app, rest: str):
     run = app.target_run() if app.focused_run() else None
-    runs = [run] if run else [r for r in (app.current.runs.values() if app.current else []) if r.live]
+    if run:
+        # Kill the focused run and its children (subagents)
+        runs = [run]
+    else:
+        # Nothing focused: kill all live runs in the task
+        runs = [r for r in (app.current.runs.values() if app.current else []) if r.live]
     n = 0
     for r in runs:
         if r.live:
-            app.hub.kill(r)
+            app.hub.kill(r)  # cascades to children via Hub.kill()
             n += 1
     app.flash(f"stopped {n} run{'s' if n != 1 else ''}" if n else "nothing is running")
 

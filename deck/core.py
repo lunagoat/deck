@@ -282,6 +282,8 @@ class Hub:
             agent = req.get("agent", "")
             if not parent:
                 return {"error": "unknown parent run"}
+            if not parent.live:
+                return {"error": "parent run is no longer active"}
             if agent not in self.available():
                 return {"error": f"{agent!r} not available; choose from {sorted(self.available())}"}
             if agent == parent.agent:
@@ -499,6 +501,10 @@ class Hub:
 
     async def _run(self, run: Run, prompt: str, use_wt: bool, session: str | None):
         t = run.task
+        if run.status == "killed":
+            run.ended = time.time()
+            self.notify(run)
+            return
         ad: Adapter = make_adapters()[run.agent]
         run.status, run.started, run.ended = "running", time.time(), 0.0
         run.summary = ""
@@ -616,12 +622,16 @@ class Hub:
         return r
 
     def kill(self, run: Run):
-        if run.proc and run.live:
+        if run.live:
             run.status = "killed"
-            try:
-                run.proc.terminate()
-            except ProcessLookupError:
-                pass
+            if run.proc:
+                try:
+                    run.proc.terminate()
+                except ProcessLookupError:
+                    pass
+        # Cascade: kill all children (subagents) of this run too
+        for child in self.children(run):
+            self.kill(child)
 
     async def diff(self, run: Run) -> str:
         if not run.branch:  # ran in place (or delegated into its parent's tree): show the tree's changes
