@@ -166,3 +166,7 @@ State lives in `~/.local/state/deck` (chosen models and efforts, saved sessions,
 The tests are headless and never start a real agent. They run in a temp dir and can't touch your deck state or repos.
 The code is about a dozen small modules under `deck/`; `adapters.py` (how each agent is launched), `core.py` (runs, worktrees,
 delegation) and `app.py` (the UI) are the places to start.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
